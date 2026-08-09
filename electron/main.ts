@@ -180,6 +180,17 @@ function apiGet(path: string, token: string): Promise<unknown> {
       let data = ''
       res.on('data', d => data += d)
       res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          // Extract meaningful error message from Google API response
+          try {
+            const errObj = JSON.parse(data)
+            const msg = errObj?.error?.message || errObj?.error?.status || data
+            reject(new Error(`API ${res.statusCode}: ${msg}`))
+          } catch {
+            reject(new Error(`API ${res.statusCode}: ${data}`))
+          }
+          return
+        }
         try { resolve(JSON.parse(data)) } catch { reject(new Error(data)) }
       })
     })
@@ -347,21 +358,34 @@ ipcMain.handle('drive:scan', async (event, query: string) => {
   return allFiles
 })
 
+// ── Role mapping: our internal names → Google Drive API names
+// Google Drive API uses 'reader'/'writer' but our UI uses 'viewer'/'editor'
+function toApiRole(role: string): string {
+  if (role === 'viewer') return 'reader'
+  if (role === 'editor') return 'writer'
+  return role  // 'commenter', 'reader', 'writer' pass through unchanged
+}
+
 // ── Drive: get file permissions
 ipcMain.handle('drive:get-permissions', async (_e, fileId: string) => {
   const token = await getValidToken()
   const result = await apiGet(
-    `/drive/v3/files/${fileId}/permissions?fields=permissions(id,emailAddress,role,type,displayName)`,
+    `/drive/v3/files/${fileId}/permissions?fields=permissions(id,emailAddress,role,type,displayName,permissionDetails)&supportsAllDrives=true`,
     token
   ) as { permissions: unknown[] }
-  return result.permissions || []
+  // Map API roles back to our internal names for the UI
+  const perms = (result.permissions || []) as { role?: string }[]
+  return perms.map(p => ({
+    ...p,
+    role: p.role === 'reader' ? 'viewer' : p.role === 'writer' ? 'editor' : p.role
+  }))
 })
 
 // ── Drive: add permission
 ipcMain.handle('drive:add-permission', async (_e, { fileId, email, role }: { fileId: string; email: string; role: string }) => {
   const token = await getValidToken()
-  const result = await apiRequest('POST', `/drive/v3/files/${fileId}/permissions`, token, {
-    role,
+  const result = await apiRequest('POST', `/drive/v3/files/${fileId}/permissions?supportsAllDrives=true&sendNotificationEmail=false`, token, {
+    role: toApiRole(role),
     type: 'user',
     emailAddress: email
   })
@@ -371,14 +395,14 @@ ipcMain.handle('drive:add-permission', async (_e, { fileId, email, role }: { fil
 // ── Drive: update permission
 ipcMain.handle('drive:update-permission', async (_e, { fileId, permissionId, role }: { fileId: string; permissionId: string; role: string }) => {
   const token = await getValidToken()
-  const result = await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${permissionId}`, token, { role })
+  const result = await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${permissionId}?supportsAllDrives=true`, token, { role: toApiRole(role) })
   return result
 })
 
 // ── Drive: delete permission
 ipcMain.handle('drive:delete-permission', async (_e, { fileId, permissionId }: { fileId: string; permissionId: string }) => {
   const token = await getValidToken()
-  await apiRequest('DELETE', `/drive/v3/files/${fileId}/permissions/${permissionId}`, token)
+  await apiRequest('DELETE', `/drive/v3/files/${fileId}/permissions/${permissionId}?supportsAllDrives=true`, token)
   return { success: true }
 })
 
@@ -395,9 +419,44 @@ ipcMain.handle('drive:get-file-info', async (_e, fileId: string) => {
 // ── Drive: set writersCanShare (高级锁表 / 解锁)
 ipcMain.handle('drive:set-writers-can-share', async (_e, { fileId, writersCanShare }: { fileId: string; writersCanShare: boolean }) => {
   const token = await getValidToken()
-  const result = await apiRequest('PATCH', `/drive/v3/files/${fileId}?fields=id,writersCanShare`, token, { writersCanShare })
+  const result = await apiRequest('PATCH', `/drive/v3/files/${fileId}?fields=id,writersCanShare&supportsAllDrives=true`, token, { writersCanShare })
   return result
 })
+
+// ── Drive: set general access (anyone / anyoneWithLink)
+ipcMain.handle('drive:set-general-access', async (_e, { fileId, access }: { fileId: string; access: 'restricted' | 'viewer' | 'commenter' | 'editor' }) => {
+  const token = await getValidToken()
+  if (access === 'restricted') {
+    const perms = await apiGet(
+      `/drive/v3/files/${fileId}/permissions?fields=permissions(id,type)&supportsAllDrives=true`,
+      token
+    ) as { permissions: { id: string; type: string }[] }
+    const anyonePerm = (perms.permissions || []).find(p => p.type === 'anyone')
+    if (anyonePerm) {
+      await apiRequest('DELETE', `/drive/v3/files/${fileId}/permissions/${anyonePerm.id}?supportsAllDrives=true`, token)
+      return { success: true, action: 'removed' }
+    }
+    return { success: true, action: 'already_restricted' }
+  } else {
+    const perms = await apiGet(
+      `/drive/v3/files/${fileId}/permissions?fields=permissions(id,type,role)&supportsAllDrives=true`,
+      token
+    ) as { permissions: { id: string; type: string; role: string }[] }
+    const anyonePerm = (perms.permissions || []).find(p => p.type === 'anyone')
+    const apiRole = toApiRole(access)  // 'viewer'→'reader', 'editor'→'writer'
+    if (anyonePerm) {
+      const result = await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${anyonePerm.id}?supportsAllDrives=true`, token, { role: apiRole })
+      return Object.assign({}, result as Record<string, unknown>, { action: 'updated' })
+    } else {
+      const result = await apiRequest('POST', `/drive/v3/files/${fileId}/permissions?supportsAllDrives=true`, token, {
+        role: apiRole,
+        type: 'anyone'
+      })
+      return Object.assign({}, result as Record<string, unknown>, { action: 'created' })
+    }
+  }
+})
+
 
 // ── Open external link
 ipcMain.handle('shell:open-external', (_e, url: string) => shell.openExternal(url))

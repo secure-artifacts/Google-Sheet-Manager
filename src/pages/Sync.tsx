@@ -225,6 +225,8 @@ export default function Sync() {
 
   const [customEmails, setCustomEmails] = useState('')
   const [targetRole, setTargetRole] = useState<'viewer' | 'commenter' | 'editor'>('editor')
+  // General access: 'restricted' = no link sharing; others = anyone with link
+  const [generalAccess, setGeneralAccess] = useState<'restricted' | 'viewer' | 'commenter' | 'editor'>('restricted')
 
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<ProgressItem[]>([])
@@ -260,7 +262,7 @@ export default function Sync() {
 
   const canRun = () => {
     if (targetFiles.length === 0) return false
-    if (mode === 'sync' || mode === 'grant') return mergedEmails.length > 0
+    if (mode === 'sync' || mode === 'grant') return mergedEmails.length > 0 || generalAccess !== 'restricted'
     if (mode === 'add' || mode === 'remove' || mode === 'modify') return parseCustomEmails().length > 0
     if (mode === 'lock' || mode === 'unlock') return true
     return false
@@ -287,19 +289,38 @@ export default function Sync() {
 
     try {
       if (mode === 'sync' || mode === 'grant') {
-        setTotalOps(targetFiles.length * (groupEmailEntries.length + (mode === 'sync' ? 5 : 0)))
+        // totalOps = per-file email operations + generalAccess ops per file
+        setTotalOps(targetFiles.length * (groupEmailEntries.length + 1))
 
         for (const file of targetFiles) {
           if (abortRef.current) break
           let currentPerms: { id: string; emailAddress: string; role: string; type: string }[] = []
-          try { currentPerms = await api.drive.getPermissions(file.driveId) as typeof currentPerms } catch { /**/ }
+          let getPermsError = ''
+          try {
+            currentPerms = await api.drive.getPermissions(file.driveId) as typeof currentPerms
+          } catch (e: unknown) {
+            getPermsError = (e as Error).message
+          }
 
+          if (getPermsError) {
+            // Cannot proceed with this file — report all emails as failed with the real error
+            for (const entry of groupEmailEntries) {
+              pushProgress({ email: entry.email, fileName: file.name, action: 'failed', error: `获取权限失败: ${getPermsError}` })
+              await addLogEntry(file.driveId, file.name, file.url, entry.email, 'failed', undefined, getPermsError)
+            }
+            continue
+          }
+
+          // currentPerms now includes permissionDetails for inherited check
           const currentMap = new Map(currentPerms.map(p => [p.emailAddress?.toLowerCase(), p]))
           const groupEmailSet = new Set(groupEmailEntries.map(e => e.email.toLowerCase()))
 
           if (mode === 'sync') {
             for (const perm of currentPerms) {
               if (perm.role === 'owner' || !perm.emailAddress) continue
+              // Skip inherited permissions — they cannot be deleted at file level
+              const isInherited = (perm as { permissionDetails?: { inherited?: boolean }[] }).permissionDetails?.some(d => d.inherited)
+              if (isInherited) continue
               if (!groupEmailSet.has(perm.emailAddress.toLowerCase())) {
                 try {
                   await api.drive.deletePermission({ fileId: file.driveId, permissionId: perm.id })
@@ -342,6 +363,17 @@ export default function Sync() {
               }
             }
           }
+
+          // Set general access (link sharing) for this file
+          try {
+            await api.drive.setGeneralAccess({ fileId: file.driveId, access: generalAccess })
+            const label = generalAccess === 'restricted'
+              ? '🔒 受限（链接分享已关闭）'
+              : `🌐 任何知道链接的人（${ROLE_LABELS[generalAccess]}）`
+            pushProgress({ email: label, fileName: file.name, action: generalAccess === 'restricted' ? 'removed' : 'modified' })
+          } catch (e: unknown) {
+            pushProgress({ email: '🌐 通用访问', fileName: file.name, action: 'failed', error: (e as Error).message })
+          }
         }
 
       } else if (mode === 'add') {
@@ -371,6 +403,12 @@ export default function Sync() {
             if (!perm) {
               pushProgress({ email, fileName: file.name, action: 'skipped' })
               await addLogEntry(file.driveId, file.name, file.url, email, 'skipped')
+              continue
+            }
+            // Skip inherited permissions
+            const isInherited = (perm as { permissionDetails?: { inherited?: boolean }[] }).permissionDetails?.some(d => d.inherited)
+            if (isInherited) {
+              pushProgress({ email, fileName: file.name, action: 'skipped', error: '继承权限，无法在文件层面删除' })
               continue
             }
             try {
@@ -506,6 +544,38 @@ export default function Sync() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* General Access / Link Sharing (sync/grant) */}
+          {needsGroup && (
+            <div className="card card-body">
+              <div className="form-label" style={{ marginBottom: 10 }}>🌐 通用访问权限（链接范围）</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.6 }}>
+                设置"任何知道链接的人"的访问范围，与上方指定邮箱权限独立生效
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {[
+                  { value: 'restricted' as const, label: '🔒 受限', desc: '仅指定邮箱可访问（默认推荐）', col: 'var(--red)' },
+                  { value: 'viewer'     as const, label: '👁 查看者', desc: '任何知道链接的人可查看', col: 'var(--green)' },
+                  { value: 'commenter'  as const, label: '💬 评论者', desc: '任何知道链接的人可评论', col: 'var(--yellow)' },
+                  { value: 'editor'     as const, label: '✏️ 编辑者', desc: '任何知道链接的人可编辑', col: 'var(--accent-2)' },
+                ].map(opt => (
+                  <div key={opt.value} onClick={() => setGeneralAccess(opt.value)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+                      borderRadius: 'var(--r-md)', cursor: 'pointer', transition: 'all 0.15s',
+                      background: generalAccess === opt.value ? 'rgba(123,111,255,0.10)' : 'var(--bg-elevated)',
+                      border: `1px solid ${generalAccess === opt.value ? 'var(--accent)' : 'var(--border)'}`,
+                    }}>
+                    <div className={`checkbox${generalAccess === opt.value ? ' checked' : ''}`} style={{ flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 13, color: generalAccess === opt.value ? opt.col : undefined }}>{opt.label}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{opt.desc}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

@@ -38,6 +38,7 @@ const api = {
         addPermission: (args) => electron_1.ipcRenderer.invoke('drive:add-permission', args),
         updatePermission: (args) => electron_1.ipcRenderer.invoke('drive:update-permission', args),
         deletePermission: (args) => electron_1.ipcRenderer.invoke('drive:delete-permission', args),
+        setGeneralAccess: (args) => electron_1.ipcRenderer.invoke('drive:set-general-access', args),
         onScanProgress: (cb) => {
             electron_1.ipcRenderer.on('drive:scan-progress', (_e, data) => cb(data));
             return () => electron_1.ipcRenderer.removeAllListeners('drive:scan-progress');

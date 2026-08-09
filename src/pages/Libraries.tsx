@@ -114,16 +114,38 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
 
   const api = eAPI()
 
+  // ── File type filter (for scan and folder) ──
+  const FILE_TYPES = [
+    { key: 'spreadsheet', label: '📊 表格', mime: 'application/vnd.google-apps.spreadsheet' },
+    { key: 'document',    label: '📝 文档', mime: 'application/vnd.google-apps.document' },
+    { key: 'presentation',label: '📑 幻灯片', mime: 'application/vnd.google-apps.presentation' },
+    { key: 'pdf',         label: '📕 PDF', mime: 'application/pdf' },
+  ] as const
+  type FileTypeKey = typeof FILE_TYPES[number]['key']
+  const [selectedTypes, setSelectedTypes] = useState<Set<FileTypeKey>>(new Set(['spreadsheet']))
+
+  const toggleType = (key: FileTypeKey) => {
+    setSelectedTypes(prev => {
+      const n = new Set(prev)
+      n.has(key) ? n.delete(key) : n.add(key)
+      return n
+    })
+  }
+
+  const buildMimeQuery = () => {
+    const mimes = FILE_TYPES.filter(t => selectedTypes.has(t.key)).map(t => `mimeType='${t.mime}'`)
+    return mimes.length ? `(${mimes.join(' or ')}) and trashed=false` : "trashed=false"
+  }
+
   const handleScan = async () => {
     setScanning(true)
     setScanProgress(null)
     setScannedFiles([])
-    // Listen to paginated progress
     const unsubscribe = api.drive.onScanProgress((data) => {
       setScanProgress({ count: data.count, page: data.page })
     })
     try {
-      const files = await api.drive.scan() as { id: string; name: string; mimeType: string; webViewLink: string; modifiedTime: string }[]
+      const files = await api.drive.scan(buildMimeQuery()) as { id: string; name: string; mimeType: string; webViewLink: string; modifiedTime: string }[]
       const existing = new Set(lib.files.map(f => f.driveId))
       setScannedFiles(files
         .filter(f => !existing.has(f.id))
@@ -153,10 +175,18 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
     showToast(`已添加 ${toAdd.length} 个文件`, 'success')
   }
 
-  const extractDriveId = (url: string): string | null => {
-    const m = url.match(/\/d\/([a-zA-Z0-9_-]{25,})/);
+  // ── URL parsing helpers ──
+  // Extracts file ID from /d/ID pattern
+  const extractFileId = (url: string): string | null => {
+    const m = url.match(/\/d\/([a-zA-Z0-9_-]{25,})/)
     return m ? m[1] : null
   }
+  // Extracts folder ID from drive/folders/ID pattern
+  const extractFolderId = (url: string): string | null => {
+    const m = url.match(/\/folders\/([a-zA-Z0-9_-]{25,})/)
+    return m ? m[1] : null
+  }
+  const isFolderUrl = (url: string) => /\/folders\//.test(url) || url.includes('drive.google.com/drive')
 
   const addByUrl = async () => {
     const urls = urlInput.split('\n').map(u => u.trim()).filter(Boolean)
@@ -164,35 +194,59 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
     setAddingUrl(true)
     let added = 0
     const newFiles = [...lib.files]
+    const existingIds = new Set(newFiles.map(f => f.driveId))
+
     for (const url of urls) {
-      const id = extractDriveId(url)
-      if (!id || newFiles.find(f => f.driveId === id)) continue
-      try {
-        const files = await api.drive.scan(`'${id}' in parents or id='${id}'`) as { id: string; name: string; mimeType: string; webViewLink: string }[]
-        // Try direct file lookup
-        let file = files[0]
-        if (!file) {
-          // fallback
-          const all = await api.drive.scan(`id='${id}'`) as { id: string; name: string; mimeType: string; webViewLink: string }[]
-          file = all[0]
+      // ── Case 1: Folder URL ──
+      if (isFolderUrl(url)) {
+        const folderId = extractFolderId(url)
+        if (!folderId) continue
+        try {
+          setScanProgress({ count: 0, page: 1 })
+          // Build query: files in this folder matching selected types
+          const mimeFilter = FILE_TYPES.filter(t => selectedTypes.has(t.key)).map(t => `mimeType='${t.mime}'`).join(' or ')
+          const q = `'${folderId}' in parents and (${mimeFilter || "mimeType!=''"}) and trashed=false`
+          const files = await api.drive.scan(q) as { id: string; name: string; mimeType: string; webViewLink: string }[]
+          for (const f of files) {
+            if (existingIds.has(f.id)) continue
+            newFiles.push({ driveId: f.id, name: f.name, url: f.webViewLink, mimeType: f.mimeType, type: mimeToType(f.mimeType), addedAt: new Date().toISOString() })
+            existingIds.add(f.id)
+            added++
+          }
+          if (files.length === 0) showToast('文件夹为空或无匹配文件类型', 'warning' as 'error')
+        } catch (e: unknown) {
+          showToast(`文件夹扫描失败: ${(e as Error).message}`, 'error')
         }
+        continue
+      }
+
+      // ── Case 2: Regular file URL ──
+      const id = extractFileId(url)
+      if (!id || existingIds.has(id)) continue
+      try {
+        const all = await api.drive.scan(`id='${id}'`) as { id: string; name: string; mimeType: string; webViewLink: string }[]
+        const file = all[0]
         if (file) {
           newFiles.push({ driveId: file.id, name: file.name, url: file.webViewLink, mimeType: file.mimeType, type: mimeToType(file.mimeType), addedAt: new Date().toISOString() })
+          existingIds.add(file.id)
           added++
         } else {
-          // best-effort
           const mime = url.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
           newFiles.push({ driveId: id, name: `文件 ${id.slice(0, 8)}...`, url, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
+          existingIds.add(id)
           added++
         }
       } catch {
         const mime = url.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
         newFiles.push({ driveId: id, name: `文件 ${id.slice(0, 8)}...`, url, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
+        existingIds.add(id)
         added++
       }
     }
+
     onUpdate({ ...lib, files: newFiles, updatedAt: new Date().toISOString() })
     setUrlInput('')
+    setScanProgress(null)
     setAddingUrl(false)
     showToast(`已添加 ${added} 个文件`, 'success')
   }
@@ -202,7 +256,7 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
     const newFiles = [...lib.files]
     let added = 0
     for (const url of lines) {
-      const id = extractDriveId(url)
+      const id = extractFileId(url)
       if (!id || newFiles.find(f => f.driveId === id)) continue
       const mime = url.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
       newFiles.push({ driveId: id, name: `文件 ${id.slice(0, 8)}...`, url, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
@@ -222,7 +276,7 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
     links.forEach(a => {
       const href = a.href
       if (!href.includes('docs.google.com') && !href.includes('sheets.google.com')) return
-      const id = extractDriveId(href)
+      const id = extractFileId(href)
       if (!id || existingIds.has(id)) return
       const mime = href.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
       result.push({ driveId: id, name: a.textContent?.trim() || href, url: href, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
@@ -292,8 +346,21 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
 
         {tab === 'scan' && (
           <div>
+            {/* File type filter */}
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>筛选文件类型（扫描时只获取选中类型）</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {FILE_TYPES.map(t => (
+                  <button key={t.key}
+                    className={`btn btn--sm ${selectedTypes.has(t.key) ? 'btn--primary' : 'btn--secondary'}`}
+                    onClick={() => toggleType(t.key)}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-              <button className="btn btn--primary" onClick={handleScan} disabled={scanning}>
+              <button className="btn btn--primary" onClick={handleScan} disabled={scanning || selectedTypes.size === 0}>
                 {scanning
                   ? <><Spinner size={14} /> {scanProgress ? `扫描中… 已发现 ${scanProgress.count} 个文件` : '扫描中...'}</>
                   : '🔍 扫描我的 Google 云端硬盘（全量）'}
@@ -337,12 +404,30 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
 
         {tab === 'url' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {/* File type filter for folder scanning */}
+            <div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>粘贴文件夹链接时，只获取以下类型：</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {FILE_TYPES.map(t => (
+                  <button key={t.key}
+                    className={`btn btn--sm ${selectedTypes.has(t.key) ? 'btn--primary' : 'btn--secondary'}`}
+                    onClick={() => toggleType(t.key)}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="form-group">
-              <label className="form-label">粘贴 Google Sheets / Docs URL（每行一个）</label>
+              <label className="form-label">粘贴 Google Sheets / Docs / 文件夹 URL（每行一个）</label>
               <textarea className="textarea" style={{ minHeight: 100 }}
-                placeholder="https://docs.google.com/spreadsheets/d/..."
+                placeholder={`https://docs.google.com/spreadsheets/d/...\nhttps://drive.google.com/drive/folders/...（文件夹链接，自动扫描其中所有文件）`}
                 value={urlInput} onChange={e => setUrlInput(e.target.value)} />
             </div>
+            {addingUrl && scanProgress && (
+              <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                <Spinner size={12} /> 正在扫描文件夹，已发现 {scanProgress.count} 个文件...
+              </div>
+            )}
             <button className="btn btn--primary" onClick={addByUrl} disabled={!urlInput.trim() || addingUrl} style={{ alignSelf: 'flex-start' }}>
               {addingUrl ? <><Spinner size={14} /> 添加中...</> : '➕ 添加'}
             </button>

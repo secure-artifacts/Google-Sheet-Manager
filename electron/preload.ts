@@ -47,6 +47,8 @@ const api = {
       ipcRenderer.invoke('drive:update-permission', args),
     deletePermission: (args: { fileId: string; permissionId: string }) =>
       ipcRenderer.invoke('drive:delete-permission', args),
+    setGeneralAccess: (args: { fileId: string; access: 'restricted' | 'viewer' | 'commenter' | 'editor' }) =>
+      ipcRenderer.invoke('drive:set-general-access', args),
     onScanProgress: (cb: (data: { count: number; page: number; hasMore: boolean }) => void) => {
       ipcRenderer.on('drive:scan-progress', (_e, data) => cb(data))
       return () => ipcRenderer.removeAllListeners('drive:scan-progress')
