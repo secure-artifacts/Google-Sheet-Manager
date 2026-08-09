@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+dist/
+out/
+release/
+
+# Electron build artifacts
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.snap
+
+# Environment & secrets
+.env
+.env.local
+*.local
+credentials.json
+client_secret*.json
+auth.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/settings.json
+*.suo
+*.user
+
+# Logs
+*.log
+npm-debug.log*
+
+# Cache
+.cache/
+.eslintcache

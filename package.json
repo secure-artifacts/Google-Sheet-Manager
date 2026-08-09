@@ -1,0 +1,58 @@
+{
+  "name": "google-sheet-manager",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "app:dev": "concurrently \"vite\" \"wait-on tcp:5173 && cross-env ELECTRON_DEV=1 electron .\"",
+    "app:start": "npm run build && electron .",
+    "app:build": "npm run build && electron-builder",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.2.4",
+    "electron": "^35.7.5",
+    "electron-builder": "^26.15.3",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "vite-plugin-electron": "^0.29.1",
+    "vite-plugin-electron-renderer": "^0.14.7",
+    "wait-on": "^8.0.5"
+  },
+  "dependencies": {
+    "axios": "^1.9.0",
+    "electron-store": "^10.0.0",
+    "googleapis": "^148.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.3"
+  },
+  "build": {
+    "appId": "com.gsheetmanager.app",
+    "productName": "Google Sheet Manager",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}

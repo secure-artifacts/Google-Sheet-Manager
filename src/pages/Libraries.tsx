@@ -1,0 +1,486 @@
+import { useState } from 'react'
+import { eAPI } from '../lib/api'
+import { useApp } from '../context/AppContext'
+import { FileLibrary, LibraryFile } from '../types'
+import { Modal, ConfirmDialog, EmptyState, FileTypeIcon, Spinner, showToast } from '../components/ui'
+
+// eAPI imported from ../lib/api
+
+const COLORS = ['#7b6fff', '#22d3a0', '#60a5fa', '#fbbf24', '#f87171', '#a78bfa', '#34d399', '#fb923c']
+
+function genId() { return `lib_${Date.now()}_${Math.random().toString(36).slice(2, 7)}` }
+function mimeToType(mime: string): 'spreadsheet' | 'document' {
+  return mime?.includes('spreadsheet') ? 'spreadsheet' : 'document'
+}
+
+// ─── Library Card ─────────────────────────────────────────────────────────────
+function LibraryCard({ lib, onOpen, onDelete }: {
+  lib: FileLibrary
+  onOpen: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="library-card" onClick={onOpen}>
+      <div className="library-card__accent" style={{ background: lib.color }} />
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ fontSize: 24 }}>🗂️</div>
+        <button className="btn btn--ghost btn--icon btn--sm"
+          onClick={e => { e.stopPropagation(); onDelete() }}
+          style={{ opacity: 0.5 }}>🗑</button>
+      </div>
+      <div className="library-card__name">{lib.name}</div>
+      <div className="library-card__desc">{lib.description || '暂无描述'}</div>
+      <div className="library-card__stats">
+        <div className="library-card__stat">文件 <span>{lib.files.length}</span></div>
+        <div className="library-card__stat">创建于 <span>{new Date(lib.createdAt).toLocaleDateString('zh-CN')}</span></div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Create Library Modal ─────────────────────────────────────────────────────
+function CreateLibraryModal({ open, onClose, onCreated }: {
+  open: boolean
+  onClose: () => void
+  onCreated: (lib: FileLibrary) => void
+}) {
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+  const [color, setColor] = useState(COLORS[0])
+
+  const handleCreate = () => {
+    if (!name.trim()) return
+    const lib: FileLibrary = {
+      id: genId(), name: name.trim(), description: desc.trim(),
+      color, files: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+    }
+    onCreated(lib)
+    setName(''); setDesc(''); setColor(COLORS[0])
+    onClose()
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="新建表格库"
+      footer={<>
+        <button className="btn btn--secondary" onClick={onClose}>取消</button>
+        <button className="btn btn--primary" onClick={handleCreate} disabled={!name.trim()}>创建</button>
+      </>}>
+      <div className="form-group">
+        <label className="form-label">库名称 *</label>
+        <input className="input" placeholder="例：客户表格库" value={name} onChange={e => setName(e.target.value)} autoFocus />
+      </div>
+      <div className="form-group">
+        <label className="form-label">描述（可选）</label>
+        <input className="input" placeholder="简短描述..." value={desc} onChange={e => setDesc(e.target.value)} />
+      </div>
+      <div className="form-group">
+        <label className="form-label">颜色标签</label>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {COLORS.map(c => (
+            <div key={c} onClick={() => setColor(c)}
+              style={{
+                width: 28, height: 28, borderRadius: '50%', background: c,
+                cursor: 'pointer', border: color === c ? '2px solid #fff' : '2px solid transparent',
+                boxShadow: color === c ? `0 0 0 2px ${c}` : 'none',
+                transition: 'all 0.15s'
+              }} />
+          ))}
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// ─── Library Detail Modal ─────────────────────────────────────────────────────
+type ImportTab = 'scan' | 'url' | 'csv' | 'bookmarks'
+
+function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
+  lib: FileLibrary
+  open: boolean
+  onClose: () => void
+  onUpdate: (lib: FileLibrary) => void
+}) {
+  const [tab, setTab] = useState<ImportTab>('scan')
+  const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState<{ count: number; page: number } | null>(null)
+  const [scannedFiles, setScannedFiles] = useState<LibraryFile[]>([])
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [urlInput, setUrlInput] = useState('')
+  const [csvText, setCsvText] = useState('')
+  const [bmkParsed, setBmkParsed] = useState<LibraryFile[]>([])
+  const [bmkSelected, setBmkSelected] = useState<Set<string>>(new Set())
+  const [addingUrl, setAddingUrl] = useState(false)
+
+  const api = eAPI()
+
+  const handleScan = async () => {
+    setScanning(true)
+    setScanProgress(null)
+    setScannedFiles([])
+    // Listen to paginated progress
+    const unsubscribe = api.drive.onScanProgress((data) => {
+      setScanProgress({ count: data.count, page: data.page })
+    })
+    try {
+      const files = await api.drive.scan() as { id: string; name: string; mimeType: string; webViewLink: string; modifiedTime: string }[]
+      const existing = new Set(lib.files.map(f => f.driveId))
+      setScannedFiles(files
+        .filter(f => !existing.has(f.id))
+        .map(f => ({ driveId: f.id, name: f.name, mimeType: f.mimeType, url: f.webViewLink, type: mimeToType(f.mimeType), addedAt: new Date().toISOString() })))
+    } catch (e: unknown) {
+      showToast((e as Error).message, 'error')
+    } finally {
+      unsubscribe()
+      setScanning(false)
+    }
+  }
+
+  const toggleScan = (id: string) => {
+    setSelectedIds(prev => {
+      const n = new Set(prev)
+      n.has(id) ? n.delete(id) : n.add(id)
+      return n
+    })
+  }
+
+  const importSelected = () => {
+    const toAdd = scannedFiles.filter(f => selectedIds.has(f.driveId))
+    const updated = { ...lib, files: [...lib.files, ...toAdd], updatedAt: new Date().toISOString() }
+    onUpdate(updated)
+    setSelectedIds(new Set())
+    setScannedFiles([])
+    showToast(`已添加 ${toAdd.length} 个文件`, 'success')
+  }
+
+  const extractDriveId = (url: string): string | null => {
+    const m = url.match(/\/d\/([a-zA-Z0-9_-]{25,})/);
+    return m ? m[1] : null
+  }
+
+  const addByUrl = async () => {
+    const urls = urlInput.split('\n').map(u => u.trim()).filter(Boolean)
+    if (!urls.length) return
+    setAddingUrl(true)
+    let added = 0
+    const newFiles = [...lib.files]
+    for (const url of urls) {
+      const id = extractDriveId(url)
+      if (!id || newFiles.find(f => f.driveId === id)) continue
+      try {
+        const files = await api.drive.scan(`'${id}' in parents or id='${id}'`) as { id: string; name: string; mimeType: string; webViewLink: string }[]
+        // Try direct file lookup
+        let file = files[0]
+        if (!file) {
+          // fallback
+          const all = await api.drive.scan(`id='${id}'`) as { id: string; name: string; mimeType: string; webViewLink: string }[]
+          file = all[0]
+        }
+        if (file) {
+          newFiles.push({ driveId: file.id, name: file.name, url: file.webViewLink, mimeType: file.mimeType, type: mimeToType(file.mimeType), addedAt: new Date().toISOString() })
+          added++
+        } else {
+          // best-effort
+          const mime = url.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
+          newFiles.push({ driveId: id, name: `文件 ${id.slice(0, 8)}...`, url, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
+          added++
+        }
+      } catch {
+        const mime = url.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
+        newFiles.push({ driveId: id, name: `文件 ${id.slice(0, 8)}...`, url, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
+        added++
+      }
+    }
+    onUpdate({ ...lib, files: newFiles, updatedAt: new Date().toISOString() })
+    setUrlInput('')
+    setAddingUrl(false)
+    showToast(`已添加 ${added} 个文件`, 'success')
+  }
+
+  const importCsv = () => {
+    const lines = csvText.split(/[\n,]/).map(l => l.trim()).filter(l => l.includes('docs.google.com') || l.includes('sheets.google.com'))
+    const newFiles = [...lib.files]
+    let added = 0
+    for (const url of lines) {
+      const id = extractDriveId(url)
+      if (!id || newFiles.find(f => f.driveId === id)) continue
+      const mime = url.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
+      newFiles.push({ driveId: id, name: `文件 ${id.slice(0, 8)}...`, url, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
+      added++
+    }
+    onUpdate({ ...lib, files: newFiles, updatedAt: new Date().toISOString() })
+    setCsvText('')
+    showToast(`已从 CSV 导入 ${added} 个文件`, 'success')
+  }
+
+  const parseBookmarks = (html: string) => {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(html, 'text/html')
+    const links = doc.querySelectorAll('a')
+    const result: LibraryFile[] = []
+    const existingIds = new Set(lib.files.map(f => f.driveId))
+    links.forEach(a => {
+      const href = a.href
+      if (!href.includes('docs.google.com') && !href.includes('sheets.google.com')) return
+      const id = extractDriveId(href)
+      if (!id || existingIds.has(id)) return
+      const mime = href.includes('spreadsheets') ? 'application/vnd.google-apps.spreadsheet' : 'application/vnd.google-apps.document'
+      result.push({ driveId: id, name: a.textContent?.trim() || href, url: href, mimeType: mime, type: mimeToType(mime), addedAt: new Date().toISOString() })
+    })
+    setBmkParsed(result)
+    setBmkSelected(new Set(result.map(f => f.driveId)))
+  }
+
+  const importBookmarks = () => {
+    const toAdd = bmkParsed.filter(f => bmkSelected.has(f.driveId))
+    onUpdate({ ...lib, files: [...lib.files, ...toAdd], updatedAt: new Date().toISOString() })
+    setBmkParsed([]); setBmkSelected(new Set())
+    showToast(`已导入 ${toAdd.length} 个书签文件`, 'success')
+  }
+
+  const removeFile = (driveId: string) => {
+    onUpdate({ ...lib, files: lib.files.filter(f => f.driveId !== driveId), updatedAt: new Date().toISOString() })
+  }
+
+  const tabs: { key: ImportTab; label: string; icon: string }[] = [
+    { key: 'scan', label: '扫描账号', icon: '🔍' },
+    { key: 'url', label: '粘贴链接', icon: '🔗' },
+    { key: 'csv', label: 'CSV导入', icon: '📄' },
+    { key: 'bookmarks', label: '书签导入', icon: '⭐' }
+  ]
+
+  return (
+    <Modal open={open} onClose={onClose} title={`${lib.name} — 文件列表`} wide>
+      {/* Current files */}
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 8 }}>
+          已添加文件（{lib.files.length}）
+        </div>
+        {lib.files.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-muted)', fontSize: 13, background: 'var(--bg-elevated)', borderRadius: 'var(--r-md)' }}>
+            尚未添加任何文件，请使用下方导入功能
+          </div>
+        ) : (
+          <div style={{ maxHeight: 200, overflowY: 'auto', background: 'var(--bg-elevated)', borderRadius: 'var(--r-md)', padding: '4px' }}>
+            {lib.files.map(f => (
+              <div key={f.driveId} className="file-item">
+                <FileTypeIcon mimeType={f.mimeType} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="file-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</div>
+                  <div className="file-meta">{f.type === 'spreadsheet' ? 'Google Sheets' : 'Google Docs'}</div>
+                </div>
+                <button className="btn btn--ghost btn--icon btn--sm" style={{ opacity: 0.5 }}
+                  onClick={() => removeFile(f.driveId)}>🗑</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="divider" />
+
+      {/* Import tabs */}
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 10 }}>添加文件</div>
+        <div className="tabs" style={{ marginBottom: 16 }}>
+          {tabs.map(t => (
+            <button key={t.key} className={`tab${tab === t.key ? ' active' : ''}`} onClick={() => setTab(t.key)}>
+              {t.icon} {t.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'scan' && (
+          <div>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button className="btn btn--primary" onClick={handleScan} disabled={scanning}>
+                {scanning
+                  ? <><Spinner size={14} /> {scanProgress ? `扫描中… 已发现 ${scanProgress.count} 个文件` : '扫描中...'}</>
+                  : '🔍 扫描我的 Google 云端硬盘（全量）'}
+              </button>
+              {scannedFiles.length > 0 && selectedIds.size > 0 && (
+                <button className="btn btn--success" onClick={importSelected}>
+                  ✅ 导入选中（{selectedIds.size}）
+                </button>
+              )}
+            </div>
+            {/* Scanning progress bar */}
+            {scanning && scanProgress && (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>
+                  正在扫描第 {scanProgress.page} 页，已发现 <strong style={{ color: 'var(--accent-2)' }}>{scanProgress.count}</strong> 个文件...
+                </div>
+                <div className="progress-bar"><div className="progress-bar__fill animate-pulse" style={{ width: '100%' }} /></div>
+              </div>
+            )}
+            {scannedFiles.length > 0 && (
+              <div style={{ maxHeight: 220, overflowY: 'auto', background: 'var(--bg-elevated)', borderRadius: 'var(--r-md)', padding: 4 }}>
+                <div style={{ display: 'flex', gap: 8, padding: '6px 10px', alignItems: 'center' }}>
+                  <button className="btn btn--ghost btn--sm" onClick={() => setSelectedIds(new Set(scannedFiles.map(f => f.driveId)))}>全选</button>
+                  <button className="btn btn--ghost btn--sm" onClick={() => setSelectedIds(new Set())}>取消全选</button>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 'auto' }}>共 {scannedFiles.length} 个文件</span>
+                </div>
+                {scannedFiles.map(f => (
+                  <div key={f.driveId} className="file-item" onClick={() => toggleScan(f.driveId)}>
+                    <div className={`checkbox${selectedIds.has(f.driveId) ? ' checked' : ''}`} />
+                    <FileTypeIcon mimeType={f.mimeType} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="file-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+
+        {tab === 'url' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div className="form-group">
+              <label className="form-label">粘贴 Google Sheets / Docs URL（每行一个）</label>
+              <textarea className="textarea" style={{ minHeight: 100 }}
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                value={urlInput} onChange={e => setUrlInput(e.target.value)} />
+            </div>
+            <button className="btn btn--primary" onClick={addByUrl} disabled={!urlInput.trim() || addingUrl} style={{ alignSelf: 'flex-start' }}>
+              {addingUrl ? <><Spinner size={14} /> 添加中...</> : '➕ 添加'}
+            </button>
+          </div>
+        )}
+
+        {tab === 'csv' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div className="form-group">
+              <label className="form-label">粘贴 CSV 内容（包含 Google 链接的行会被自动识别）</label>
+              <textarea className="textarea" style={{ minHeight: 120 }}
+                placeholder="可直接粘贴多行包含 docs.google.com 或 sheets.google.com 的内容..."
+                value={csvText} onChange={e => setCsvText(e.target.value)} />
+            </div>
+            <button className="btn btn--primary" onClick={importCsv} disabled={!csvText.trim()} style={{ alignSelf: 'flex-start' }}>
+              📥 导入
+            </button>
+          </div>
+        )}
+
+        {tab === 'bookmarks' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--r-md)', padding: '12px 14px', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+              <strong>使用方法：</strong><br />
+              1. 打开 Chrome 浏览器 → 书签 → 书签管理器<br />
+              2. 点击右上角「⋮」→「导出书签」→ 保存 HTML 文件<br />
+              3. 点击下方按钮选择该 HTML 文件
+            </div>
+            <div>
+              <label style={{ display: 'inline-block' }}>
+                <input type="file" accept=".html,.htm" style={{ display: 'none' }}
+                  onChange={e => {
+                    const file = e.target.files?.[0]
+                    if (!file) return
+                    const reader = new FileReader()
+                    reader.onload = ev => parseBookmarks(ev.target?.result as string)
+                    reader.readAsText(file)
+                  }} />
+                <span className="btn btn--secondary">📂 选择书签 HTML 文件</span>
+              </label>
+            </div>
+            {bmkParsed.length > 0 && (
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                    找到 {bmkParsed.length} 个 Google 文件（已选 {bmkSelected.size}）
+                  </span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button className="btn btn--ghost btn--sm" onClick={() => setBmkSelected(new Set(bmkParsed.map(f => f.driveId)))}>全选</button>
+                    <button className="btn btn--ghost btn--sm" onClick={() => setBmkSelected(new Set())}>取消</button>
+                  </div>
+                </div>
+                <div style={{ maxHeight: 200, overflowY: 'auto', background: 'var(--bg-elevated)', borderRadius: 'var(--r-md)', padding: 4 }}>
+                  {bmkParsed.map(f => (
+                    <div key={f.driveId} className="file-item" onClick={() => setBmkSelected(prev => {
+                      const n = new Set(prev); n.has(f.driveId) ? n.delete(f.driveId) : n.add(f.driveId); return n
+                    })}>
+                      <div className={`checkbox${bmkSelected.has(f.driveId) ? ' checked' : ''}`} />
+                      <FileTypeIcon mimeType={f.mimeType} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="file-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <button className="btn btn--success" style={{ marginTop: 10 }}
+                  onClick={importBookmarks} disabled={bmkSelected.size === 0}>
+                  ✅ 导入选中（{bmkSelected.size}）
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+// ─── Main Libraries Page ──────────────────────────────────────────────────────
+export default function Libraries() {
+  const { libraries, saveLibraries } = useApp()
+  const [createOpen, setCreateOpen] = useState(false)
+  const [selectedLib, setSelectedLib] = useState<FileLibrary | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<FileLibrary | null>(null)
+
+  const handleCreate = async (lib: FileLibrary) => {
+    await saveLibraries([...libraries, lib])
+    showToast('表格库已创建', 'success')
+  }
+
+  const handleUpdate = async (updated: FileLibrary) => {
+    await saveLibraries(libraries.map(l => l.id === updated.id ? updated : l))
+    if (selectedLib?.id === updated.id) setSelectedLib(updated)
+  }
+
+  const handleDelete = async (lib: FileLibrary) => {
+    await saveLibraries(libraries.filter(l => l.id !== lib.id))
+    showToast('表格库已删除', 'success')
+  }
+
+  return (
+    <div className="page">
+      <div className="page-header">
+        <div className="page-header__left">
+          <h1 className="page-title">🗂️ 表格库</h1>
+          <p className="page-subtitle">创建分组，将需要管理的 Google 文件集中在一起</p>
+        </div>
+        <div className="page-header__actions">
+          <button className="btn btn--primary" onClick={() => setCreateOpen(true)}>
+            ＋ 新建表格库
+          </button>
+        </div>
+      </div>
+
+      {libraries.length === 0 ? (
+        <EmptyState icon="🗂️" title="暂无表格库" desc="创建您的第一个表格库，将 Google Sheets 和 Docs 集中管理"
+          action={<button className="btn btn--primary" onClick={() => setCreateOpen(true)}>＋ 新建表格库</button>} />
+      ) : (
+        <div className="grid-3">
+          {libraries.map(lib => (
+            <LibraryCard key={lib.id} lib={lib}
+              onOpen={() => setSelectedLib(lib)}
+              onDelete={() => setDeleteTarget(lib)} />
+          ))}
+        </div>
+      )}
+
+      <CreateLibraryModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreate} />
+
+      {selectedLib && (
+        <LibraryDetailModal lib={selectedLib} open={!!selectedLib}
+          onClose={() => setSelectedLib(null)} onUpdate={handleUpdate} />
+      )}
+
+      <ConfirmDialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}
+        onConfirm={() => deleteTarget && handleDelete(deleteTarget)}
+        title="删除表格库" danger
+        message={`确定要删除「${deleteTarget?.name}」吗？该操作不可恢复，库中的文件引用将一并删除（不影响 Google 云端实际文件）。`} />
+    </div>
+  )
+}
