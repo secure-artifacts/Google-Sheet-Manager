@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: write        # 上传 Release assets
+  id-token: write        # 生成 OIDC token（attest 必须）
+  attestations: write    # 写入构建证明
 
 jobs:
   build:
@@ -28,34 +28,84 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build renderer
+      - name: Build renderer (Vite)
         run: npx vite build
 
-      - name: Build Electron main
+      - name: Build Electron main (TypeScript)
         run: npx tsc -p tsconfig.electron.json
 
-      - name: Build Electron app (portable exe)
-        run: npx electron-builder --win portable --publish never
+      # ── 打包：同时生成 NSIS 安装包 + portable exe + zip ──────────────────────
+      - name: Package Electron app
+        run: npx electron-builder --win nsis portable --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ── 列出产物，方便调试 ───────────────────────────────────────────────────
       - name: List build artifacts
-        run: Get-ChildItem release/ -Recurse | Select-Object FullName, Length
         shell: pwsh
+        run: |
+          Write-Host "=== Release directory contents ==="
+          Get-ChildItem release/ -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
 
-      - name: Create GitHub Release
-        id: create_release
+      # ── 收集所有需要上传的产物路径（同一个 job 保证 SHA256 不变）──────────────
+      - name: Collect artifact paths
+        id: artifacts
+        shell: pwsh
+        run: |
+          $files = @()
+          # NSIS installer (.exe)
+          $installer = Get-ChildItem release/ -Recurse -Filter "*Setup*.exe" | Select-Object -First 1
+          if ($installer) { $files += $installer.FullName }
+          # Portable exe
+          $portable = Get-ChildItem release/ -Recurse -Filter "*.exe" | Where-Object { $_.Name -notlike "*Setup*" } | Select-Object -First 1
+          if ($portable) { $files += $portable.FullName }
+          # blockmap for delta updates
+          $blockmaps = Get-ChildItem release/ -Recurse -Filter "*.blockmap"
+          foreach ($b in $blockmaps) { $files += $b.FullName }
+
+          $joined = $files -join "`n"
+          Write-Host "Collected artifacts:`n$joined"
+          # Save as multiline output
+          "paths<<EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $joined | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # ── SLSA 构建证明（必须在 Release 上传之前，同一 job 同一文件）───────────
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release/**/*.exe
+            release/**/*.blockmap
+
+      # ── 上传到 GitHub Release（与 attest 同一 job，文件未经任何压缩/重打包）─
+      - name: Create / Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Google Sheet Manager ${{ github.ref_name }}
+          name: "Google Sheet Manager ${{ github.ref_name }}"
           draft: false
           prerelease: false
-          files: release/**/*.exe
+          generate_release_notes: false
+          files: |
+            release/**/*.exe
+            release/**/*.blockmap
+          body: |
+            ## Google Sheet Manager ${{ github.ref_name }}
+
+            ### 安装说明
+            - **安装包**：下载 `*-Setup.exe`，双击安装（支持选择安装目录）
+            - **便携版**：下载不含 Setup 的 `.exe`，解压后直接运行，无需安装
+
+            **系统要求**：Windows 10 / 11（64位）
+
+            **首次使用**：
+            1. 进入「设置」，填入 Google OAuth 客户端 ID 和密钥
+            2. 点击「登录 Google 账号」完成授权
+            3. 在「表格库」添加文件，在「权限库」管理邮箱，在「执行操作」批量同步
+
+            ---
+            构建证明（SLSA）：${{ steps.attest.outputs.bundle-path }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Attest build artifacts
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: release/**/*.exe
