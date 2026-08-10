@@ -362,7 +362,7 @@ electron_1.ipcMain.handle('groups:save', (_e, data) => { writeJson('permissionGr
 // ── Logs
 electron_1.ipcMain.handle('logs:get', () => readJson('logs.json', { logs: [] }));
 electron_1.ipcMain.handle('logs:save', (_e, data) => { writeJson('logs.json', data); return { success: true }; });
-// ── Drive: scan ALL files (paginated)
+// ── Drive: scan files (paginated) — supports My Drive + Shared Drives
 electron_1.ipcMain.handle('drive:scan', async (event, query) => {
     const token = await getValidToken();
     const q = query || "(mimeType='application/vnd.google-apps.spreadsheet' or mimeType='application/vnd.google-apps.document') and trashed=false";
@@ -370,14 +370,63 @@ electron_1.ipcMain.handle('drive:scan', async (event, query) => {
     let pageToken = undefined;
     let page = 0;
     do {
-        const url = `/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime,writersCanShare)${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+        const url = `/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives&fields=nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime,writersCanShare,owners)${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
         const result = await apiGet(url, token);
         allFiles = allFiles.concat(result.files || []);
         pageToken = result.nextPageToken;
         page++;
-        // Send progress to renderer
         event.sender.send('drive:scan-progress', { count: allFiles.length, page, hasMore: !!pageToken });
     } while (pageToken);
+    return allFiles;
+});
+// ── Drive: recursively scan folder(s) using BFS — supports all subfolders + owner filter
+electron_1.ipcMain.handle('drive:scan-folder-recursive', async (event, { folderIds, mimeTypes, ownerOnly }) => {
+    const token = await getValidToken();
+    const allFiles = [];
+    const visitedFolders = new Set();
+    const collectedIds = new Set();
+    const FOLDER_MIME = 'application/vnd.google-apps.folder';
+    // BFS queue starts with the root folders
+    const queue = [...folderIds];
+    while (queue.length > 0) {
+        const folderId = queue.shift();
+        if (visitedFolders.has(folderId))
+            continue;
+        visitedFolders.add(folderId);
+        let pageToken = undefined;
+        do {
+            // Get ALL items (files + subfolders) in this folder — no mime filter here so we catch subfolders
+            const q = `'${folderId}' in parents and trashed=false`;
+            const url = `/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime,owners)${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+            const result = await apiGet(url, token);
+            for (const file of (result.files || [])) {
+                if (file.mimeType === FOLDER_MIME) {
+                    // Found a subfolder → add to BFS queue for recursive scan
+                    if (!visitedFolders.has(file.id))
+                        queue.push(file.id);
+                    continue;
+                }
+                // Apply mime type filter
+                if (mimeTypes.length > 0 && !mimeTypes.includes(file.mimeType))
+                    continue;
+                // Apply owner filter
+                if (ownerOnly && !file.owners?.some(o => o.me))
+                    continue;
+                // Deduplicate
+                if (collectedIds.has(file.id))
+                    continue;
+                allFiles.push(file);
+                collectedIds.add(file.id);
+            }
+            pageToken = result.nextPageToken;
+        } while (pageToken);
+        // Report progress: files collected so far + how many folders visited
+        event.sender.send('drive:scan-progress', {
+            count: allFiles.length,
+            page: visitedFolders.size,
+            hasMore: queue.length > 0
+        });
+    }
     return allFiles;
 });
 // ── Role mapping: our internal names → Google Drive API names

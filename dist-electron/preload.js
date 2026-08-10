@@ -32,6 +32,7 @@ const api = {
     // Drive API
     drive: {
         scan: (query) => electron_1.ipcRenderer.invoke('drive:scan', query),
+        scanFolderRecursive: (args) => electron_1.ipcRenderer.invoke('drive:scan-folder-recursive', args),
         getPermissions: (fileId) => electron_1.ipcRenderer.invoke('drive:get-permissions', fileId),
         getFileInfo: (fileId) => electron_1.ipcRenderer.invoke('drive:get-file-info', fileId),
         setWritersCanShare: (args) => electron_1.ipcRenderer.invoke('drive:set-writers-can-share', args),

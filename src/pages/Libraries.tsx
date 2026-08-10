@@ -93,7 +93,7 @@ function CreateLibraryModal({ open, onClose, onCreated }: {
 }
 
 // ─── Library Detail Modal ─────────────────────────────────────────────────────
-type ImportTab = 'scan' | 'url' | 'csv' | 'bookmarks'
+type ImportTab = 'scan' | 'folder' | 'url' | 'csv' | 'bookmarks'
 
 function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
   lib: FileLibrary
@@ -111,6 +111,12 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
   const [bmkParsed, setBmkParsed] = useState<LibraryFile[]>([])
   const [bmkSelected, setBmkSelected] = useState<Set<string>>(new Set())
   const [addingUrl, setAddingUrl] = useState(false)
+  // ── Folder scan state ──
+  const [folderInput, setFolderInput] = useState('')
+  const [folderScanning, setFolderScanning] = useState(false)
+  const [folderScanProgress, setFolderScanProgress] = useState<{ count: number; page: number; folder: string } | null>(null)
+  const [folderScannedFiles, setFolderScannedFiles] = useState<LibraryFile[]>([])
+  const [folderSelectedIds, setFolderSelectedIds] = useState<Set<string>>(new Set())
 
   const api = eAPI()
 
@@ -123,6 +129,7 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
   ] as const
   type FileTypeKey = typeof FILE_TYPES[number]['key']
   const [selectedTypes, setSelectedTypes] = useState<Set<FileTypeKey>>(new Set(['spreadsheet']))
+  const [ownerOnly, setOwnerOnly] = useState(false)  // true = only files where I am the owner
 
   const toggleType = (key: FileTypeKey) => {
     setSelectedTypes(prev => {
@@ -132,9 +139,12 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
     })
   }
 
-  const buildMimeQuery = () => {
+  const buildMimeQuery = (forOwnerOnly?: boolean) => {
     const mimes = FILE_TYPES.filter(t => selectedTypes.has(t.key)).map(t => `mimeType='${t.mime}'`)
-    return mimes.length ? `(${mimes.join(' or ')}) and trashed=false` : "trashed=false"
+    const mimeClause = mimes.length ? `(${mimes.join(' or ')})` : null
+    const ownerClause = (forOwnerOnly ?? ownerOnly) ? `'me' in owners` : null
+    const parts = [ownerClause, mimeClause, 'trashed=false'].filter(Boolean)
+    return parts.join(' and ')
   }
 
   const handleScan = async () => {
@@ -297,11 +307,68 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
   }
 
   const tabs: { key: ImportTab; label: string; icon: string }[] = [
-    { key: 'scan', label: '扫描账号', icon: '🔍' },
-    { key: 'url', label: '粘贴链接', icon: '🔗' },
-    { key: 'csv', label: 'CSV导入', icon: '📄' },
+    { key: 'scan',   label: '扫描账号', icon: '🔍' },
+    { key: 'folder', label: '扫描文件夹', icon: '📂' },
+    { key: 'url',    label: '粘贴链接', icon: '🔗' },
+    { key: 'csv',    label: 'CSV导入',  icon: '📄' },
     { key: 'bookmarks', label: '书签导入', icon: '⭐' }
   ]
+
+  // ── Folder scan logic ──
+  const handleFolderScan = async () => {
+    const lines = folderInput.split('\n').map(l => l.trim()).filter(Boolean)
+    const folderIds: string[] = []
+    for (const line of lines) {
+      const m = line.match(/\/folders\/([a-zA-Z0-9_-]{10,})/)
+      if (m) folderIds.push(m[1])
+    }
+    if (!folderIds.length) { showToast('请输入有效的 Google Drive 文件夹链接', 'error'); return }
+
+    setFolderScanning(true)
+    setFolderScanProgress(null)
+    setFolderScannedFiles([])
+    setFolderSelectedIds(new Set())
+
+    const existing = new Set(lib.files.map(f => f.driveId))
+    const mimeTypes = FILE_TYPES.filter(t => selectedTypes.has(t.key)).map(t => t.mime)
+
+    const unsubscribe = api.drive.onScanProgress((data) => {
+      setFolderScanProgress({ count: data.count, page: data.page, folder: `已扫描 ${data.page} 个文件夹` })
+    })
+
+    try {
+      // Use recursive BFS scan — scans all subfolders automatically
+      const files = await (api.drive as unknown as {
+        scanFolderRecursive: (args: { folderIds: string[]; mimeTypes: string[]; ownerOnly: boolean }) => Promise<{ id: string; name: string; mimeType: string; webViewLink: string }[]>
+      }).scanFolderRecursive({ folderIds, mimeTypes, ownerOnly })
+
+      const collected: LibraryFile[] = files
+        .filter(f => !existing.has(f.id))
+        .map(f => ({ driveId: f.id, name: f.name, url: f.webViewLink, mimeType: f.mimeType, type: mimeToType(f.mimeType), addedAt: new Date().toISOString() }))
+
+      setFolderScannedFiles(collected)
+      setFolderSelectedIds(new Set(collected.map(f => f.driveId)))
+      if (collected.length === 0) showToast('未找到匹配文件，请检查文件夹链接或文件类型筛选', 'error')
+    } catch (e: unknown) {
+      showToast(`扫描失败: ${(e as Error).message}`, 'error')
+    } finally {
+      unsubscribe()
+      setFolderScanning(false)
+      setFolderScanProgress(null)
+    }
+  }
+
+  const importFolderSelected = () => {
+    const toAdd = folderScannedFiles.filter(f => folderSelectedIds.has(f.driveId))
+    onUpdate({ ...lib, files: [...lib.files, ...toAdd], updatedAt: new Date().toISOString() })
+    setFolderScannedFiles([])
+    setFolderSelectedIds(new Set())
+    showToast(`已添加 ${toAdd.length} 个文件`, 'success')
+  }
+
+  const toggleFolderFile = (id: string) => {
+    setFolderSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
+  }
 
   return (
     <Modal open={open} onClose={onClose} title={`${lib.name} — 文件列表`} wide>
@@ -359,6 +426,17 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
                 ))}
               </div>
             </div>
+            {/* Owner filter */}
+            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13 }}>
+                <input type="checkbox" checked={ownerOnly} onChange={e => setOwnerOnly(e.target.checked)}
+                  style={{ width: 15, height: 15, cursor: 'pointer' }} />
+                <span>仅显示我是所有者的文件</span>
+              </label>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                {ownerOnly ? '（只扫描你创建/拥有的文件）' : '（包含他人共享给你的文件）'}
+              </span>
+            </div>
             <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
               <button className="btn btn--primary" onClick={handleScan} disabled={scanning || selectedTypes.size === 0}>
                 {scanning
@@ -401,6 +479,103 @@ function LibraryDetailModal({ lib, open, onClose, onUpdate }: {
           </div>
         )}
 
+
+
+        {/* ── 扫描文件夹 tab ── */}
+        {tab === 'folder' && (
+          <div>
+            {/* File type filter */}
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>筛选文件类型（只扫描选中的类型）</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {FILE_TYPES.map(t => (
+                  <button key={t.key}
+                    className={`btn btn--sm ${selectedTypes.has(t.key) ? 'btn--primary' : 'btn--secondary'}`}
+                    onClick={() => toggleType(t.key)}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Owner filter */}
+            <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13 }}>
+                <input type="checkbox" checked={ownerOnly} onChange={e => setOwnerOnly(e.target.checked)}
+                  style={{ width: 15, height: 15, cursor: 'pointer' }} />
+                <span>仅扫描我是所有者的文件</span>
+              </label>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                {ownerOnly ? '（只返回你创建的文件）' : '（包含他人共享给你的文件）'}
+              </span>
+              <span style={{ fontSize: 11, color: 'var(--accent-2)', marginLeft: 'auto' }}>
+                🔄 自动递归扫描所有子文件夹
+              </span>
+            </div>
+
+            {/* Folder URL input */}
+            <div className="form-group" style={{ marginBottom: 10 }}>
+              <label className="form-label">粘贴 Google Drive 文件夹链接（每行一个，支持多个文件夹）</label>
+              <textarea className="textarea" style={{ minHeight: 90 }}
+                placeholder={'https://drive.google.com/drive/folders/XXXXXXX\nhttps://drive.google.com/drive/folders/YYYYYYY\n（可同时粘贴多个文件夹链接，自动合并去重，自动扫描所有子文件夹）'}
+                value={folderInput}
+                onChange={e => setFolderInput(e.target.value)}
+                disabled={folderScanning}
+              />
+            </div>
+
+            {/* Scan button */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+              <button className="btn btn--primary"
+                onClick={handleFolderScan}
+                disabled={folderScanning || !folderInput.trim() || selectedTypes.size === 0}>
+                {folderScanning
+                  ? <><Spinner size={14} /> {folderScanProgress ? `正在扫描… 已发现 ${folderScanProgress.count} 个文件` : '扫描中...'}</>
+                  : '📂 开始扫描文件夹'}
+              </button>
+              {folderScannedFiles.length > 0 && folderSelectedIds.size > 0 && (
+                <button className="btn btn--success" onClick={importFolderSelected}>
+                  ✅ 导入选中（{folderSelectedIds.size}）
+                </button>
+              )}
+            </div>
+
+            {/* Progress */}
+            {folderScanning && folderScanProgress && (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 4, wordBreak: 'break-all' }}>
+                  正在递归扫描子文件夹（已扫描 <strong style={{ color: 'var(--accent-2)' }}>{folderScanProgress.page}</strong> 个文件夹），已找到 <strong style={{ color: 'var(--accent-2)' }}>{folderScanProgress.count}</strong> 个文件...
+                </div>
+                <div className="progress-bar"><div className="progress-bar__fill animate-pulse" style={{ width: '100%' }} /></div>
+              </div>
+            )}
+
+            {/* Results */}
+            {folderScannedFiles.length > 0 && (
+              <div style={{ maxHeight: 240, overflowY: 'auto', background: 'var(--bg-elevated)', borderRadius: 'var(--r-md)', padding: 4 }}>
+                <div style={{ display: 'flex', gap: 8, padding: '6px 10px', alignItems: 'center' }}>
+                  <button className="btn btn--ghost btn--sm"
+                    onClick={() => setFolderSelectedIds(new Set(folderScannedFiles.map(f => f.driveId)))}>全选</button>
+                  <button className="btn btn--ghost btn--sm"
+                    onClick={() => setFolderSelectedIds(new Set())}>取消全选</button>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                    共 {folderScannedFiles.length} 个文件（已选 {folderSelectedIds.size}）
+                  </span>
+                </div>
+                {folderScannedFiles.map(f => (
+                  <div key={f.driveId} className="file-item" onClick={() => toggleFolderFile(f.driveId)}>
+                    <div className={`checkbox${folderSelectedIds.has(f.driveId) ? ' checked' : ''}`} />
+                    <FileTypeIcon mimeType={f.mimeType} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="file-name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</div>
+                      <div className="file-meta" style={{ fontSize: 11 }}>{f.type === 'spreadsheet' ? 'Google Sheets' : f.type === 'document' ? 'Google Docs' : f.mimeType}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {tab === 'url' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
