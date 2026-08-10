@@ -68,7 +68,7 @@ jobs:
 
       # ── 上传到 GitHub Release（只上传两个用户文件）────────────────────────────
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "Google Sheet Manager ${{ github.ref_name }}"
