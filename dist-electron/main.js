@@ -518,32 +518,39 @@ electron_1.ipcMain.handle('shell:open-external', (_e, url) => electron_1.shell.o
 // ── Drive: Transfer Ownership (2-step: ensure editor → set owner) ─────────────
 electron_1.ipcMain.handle('drive:transfer-ownership', async (_e, { fileId, targetEmail }) => {
     const token = await getValidToken();
-    // Fetch current permissions
+    // ── Pre-check: Shared Drive files cannot have ownership transferred ──────────
+    const fileInfo = await apiGet(`/drive/v3/files/${fileId}?fields=id,name,driveId,ownedByMe`, token);
+    if (fileInfo.driveId) {
+        // File is in a Shared Drive — ownership transfer not supported by Google
+        throw new Error('共享云盘（Shared Drive）中的文件不支持所有权转让。请先将文件移至「我的云盘」后再操作。');
+    }
+    if (fileInfo.ownedByMe === false) {
+        throw new Error('当前账号不是该文件的所有者，无法发起所有权转让。');
+    }
+    // ── Fetch current permissions ────────────────────────────────────────────────
     const permsResult = await apiGet(`/drive/v3/files/${fileId}/permissions?fields=permissions(id,emailAddress,role,type)&supportsAllDrives=true`, token);
     const perms = permsResult.permissions || [];
     const existing = perms.find(p => p.emailAddress?.toLowerCase() === targetEmail.toLowerCase());
-    // If already owner → skip everything
+    // Already owner → skip
     if (existing?.role === 'owner')
         return { status: 'already_owner' };
-    let permId;
-    // Step 1: ensure target has editor (writer) role
-    if (!existing) {
-        // Add new editor permission
-        const created = await apiRequest('POST', `/drive/v3/files/${fileId}/permissions?sendNotificationEmail=true&supportsAllDrives=true`, token, { role: 'writer', type: 'user', emailAddress: targetEmail });
-        permId = created.id;
+    // ── Step 1: Remove existing (non-owner) permission if it exists ──────────────
+    // We'll recreate it as 'owner' in one request to avoid the PATCH consent error
+    if (existing && existing.role !== 'owner') {
+        try {
+            await apiRequest('DELETE', `/drive/v3/files/${fileId}/permissions/${existing.id}?supportsAllDrives=true`, token, null);
+        }
+        catch {
+            // Non-fatal if delete fails — we'll still try to create
+        }
     }
-    else if (existing.role !== 'writer') {
-        // Upgrade existing permission to editor
-        await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${existing.id}?supportsAllDrives=true`, token, { role: 'writer' });
-        permId = existing.id;
-    }
-    else {
-        // Already editor
-        permId = existing.id;
-    }
-    // Step 2: Transfer ownership (role='owner' + transferOwnership=true)
-    await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${permId}?transferOwnership=true&supportsAllDrives=true`, token, { role: 'owner' });
-    return { status: 'transferred', permId };
+    // ── Step 2: POST a new permission with role='owner' directly ─────────────────
+    // Using permissions.create (POST) with transferOwnership=true avoids the
+    // consentRequiredForOwnershipTransfer error that occurs when PATCHing.
+    // moveToNewOwnerRoot=true: move file to new owner's My Drive root
+    // sendNotificationEmail=true: recipient gets email to accept (required for Gmail)
+    await apiRequest('POST', `/drive/v3/files/${fileId}/permissions?transferOwnership=true&moveToNewOwnerRoot=true&sendNotificationEmail=true&supportsAllDrives=true`, token, { role: 'owner', type: 'user', emailAddress: targetEmail });
+    return { status: 'transferred' };
 });
 // ── Drive: Accept Ownership (current user accepts a pending ownership transfer) ─
 electron_1.ipcMain.handle('drive:accept-ownership', async (_e, { fileId, userEmail }) => {
@@ -556,8 +563,8 @@ electron_1.ipcMain.handle('drive:accept-ownership', async (_e, { fileId, userEma
         throw new Error('当前账号在该文件上没有权限记录，无法接收所有权');
     if (myPerm.role === 'owner')
         return { status: 'already_owner' };
-    // Accept the pending ownership transfer
-    await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${myPerm.id}?transferOwnership=true&supportsAllDrives=true`, token, { role: 'owner' });
+    // Accept the pending ownership: POST a new owner permission for ourselves
+    await apiRequest('POST', `/drive/v3/files/${fileId}/permissions?transferOwnership=true&moveToNewOwnerRoot=true&sendNotificationEmail=false&supportsAllDrives=true`, token, { role: 'owner', type: 'user', emailAddress: userEmail });
     return { status: 'accepted' };
 });
 // ── Sheets: export library files to a Google Sheet ───────────────────────────
