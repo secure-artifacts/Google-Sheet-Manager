@@ -52,6 +52,7 @@ const OAUTH_CONFIG = {
   redirectUri: 'http://localhost:42813/oauth/callback',
   scopes: [
     'https://www.googleapis.com/auth/drive',
+    'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/userinfo.email',
     'https://www.googleapis.com/auth/userinfo.profile'
   ]
@@ -520,6 +521,70 @@ ipcMain.handle('drive:set-general-access', async (_e, { fileId, access }: { file
 
 // ── Open external link
 ipcMain.handle('shell:open-external', (_e, url: string) => shell.openExternal(url))
+
+// ── Sheets: export library files to a Google Sheet ───────────────────────────
+ipcMain.handle('sheets:export-library', async (
+  event,
+  { files, spreadsheetId, sheetName, includeHeader }:
+  { files: { driveId: string; name: string; url: string }[]; spreadsheetId: string; sheetName: string; includeHeader: boolean }
+) => {
+  const token = await getValidToken()
+
+  // Role display map
+  const roleLabel = (role: string) => ({ reader: '查看者', commenter: '评论者', writer: '编辑者', owner: '所有者' }[role] || role)
+
+  const rows: string[][] = []
+  if (includeHeader) rows.push(['文件名称', '文件链接', '所有者', '常规访问权限'])
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]
+    event.sender.send('sheets:export-progress', { current: i + 1, total: files.length, name: file.name })
+
+    let ownerEmail = '未知'
+    let generalAccess = '受限（仅指定人员）'
+
+    try {
+      const permsResult = await apiGet(
+        `/drive/v3/files/${file.driveId}/permissions?fields=permissions(id,emailAddress,role,type,displayName)&supportsAllDrives=true`,
+        token
+      ) as { permissions: { id: string; emailAddress?: string; role: string; type: string; displayName?: string }[] }
+
+      const perms = permsResult.permissions || []
+
+      // Owner is the user with role='owner'
+      const ownerPerm = perms.find(p => p.role === 'owner')
+      if (ownerPerm) ownerEmail = ownerPerm.emailAddress || ownerPerm.displayName || '未知'
+
+      // General access = 'anyone' type permission
+      const anyonePerm = perms.find(p => p.type === 'anyone')
+      if (anyonePerm) generalAccess = `任何知道链接的人（${roleLabel(anyonePerm.role)}）`
+    } catch {
+      // Per-file errors are non-fatal
+    }
+
+    rows.push([file.name, file.url, ownerEmail, generalAccess])
+  }
+
+  // ── Append rows to Google Sheet below existing content ──
+  // Using Sheets API v4 append — automatically finds first empty row in the range
+  const range = encodeURIComponent(`${sheetName}!A1`)
+  const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`
+
+  const res = await fetch(appendUrl, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ values: rows })
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as { error?: { message?: string } }
+    throw new Error(`Sheets API error ${res.status}: ${err?.error?.message || res.statusText}`)
+  }
+
+  const result = await res.json() as { updates?: { updatedRows?: number } }
+  return { success: true, rowsWritten: rows.length, updatedRows: result.updates?.updatedRows }
+})
+
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(createWindow)

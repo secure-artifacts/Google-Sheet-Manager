@@ -45,6 +45,14 @@ const api = {
             return () => electron_1.ipcRenderer.removeAllListeners('drive:scan-progress');
         }
     },
+    // Sheets export
+    sheets: {
+        exportLibrary: (args) => electron_1.ipcRenderer.invoke('sheets:export-library', args),
+        onExportProgress: (cb) => {
+            electron_1.ipcRenderer.on('sheets:export-progress', (_e, data) => cb(data));
+            return () => electron_1.ipcRenderer.removeAllListeners('sheets:export-progress');
+        }
+    },
     // Shell
     shell: {
         openExternal: (url) => electron_1.ipcRenderer.invoke('shell:open-external', url)

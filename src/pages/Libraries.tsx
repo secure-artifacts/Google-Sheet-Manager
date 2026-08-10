@@ -14,19 +14,25 @@ function mimeToType(mime: string): 'spreadsheet' | 'document' {
 }
 
 // ─── Library Card ─────────────────────────────────────────────────────────────
-function LibraryCard({ lib, onOpen, onDelete }: {
+function LibraryCard({ lib, onOpen, onDelete, onExport }: {
   lib: FileLibrary
   onOpen: () => void
   onDelete: () => void
+  onExport: () => void
 }) {
   return (
     <div className="library-card" onClick={onOpen}>
       <div className="library-card__accent" style={{ background: lib.color }} />
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 }}>
         <div style={{ fontSize: 24 }}>🗂️</div>
-        <button className="btn btn--ghost btn--icon btn--sm"
-          onClick={e => { e.stopPropagation(); onDelete() }}
-          style={{ opacity: 0.5 }}>🗑</button>
+        <div style={{ display: 'flex', gap: 4 }} onClick={e => e.stopPropagation()}>
+          <button className="btn btn--ghost btn--sm" title="导出到表格"
+            onClick={e => { e.stopPropagation(); onExport() }}
+            style={{ fontSize: 12, padding: '3px 8px' }}>📤 导出</button>
+          <button className="btn btn--ghost btn--icon btn--sm"
+            onClick={e => { e.stopPropagation(); onDelete() }}
+            style={{ opacity: 0.5 }}>🗑</button>
+        </div>
       </div>
       <div className="library-card__name">{lib.name}</div>
       <div className="library-card__desc">{lib.description || '暂无描述'}</div>
@@ -35,6 +41,131 @@ function LibraryCard({ lib, onOpen, onDelete }: {
         <div className="library-card__stat">创建于 <span>{new Date(lib.createdAt).toLocaleDateString('zh-CN')}</span></div>
       </div>
     </div>
+  )
+}
+
+// ─── Export Library Modal ──────────────────────────────────────────────────────
+function ExportLibraryModal({ lib, open, onClose }: {
+  lib: FileLibrary | null
+  open: boolean
+  onClose: () => void
+}) {
+  const [sheetUrl, setSheetUrl] = useState('')
+  const [sheetName, setSheetName] = useState('Sheet1')
+  const [includeHeader, setIncludeHeader] = useState(true)
+  const [exporting, setExporting] = useState(false)
+  const [progress, setProgress] = useState<{ current: number; total: number; name: string } | null>(null)
+  const api = eAPI()
+
+  // Extract spreadsheet ID from URL
+  const extractSheetId = (url: string): string | null => {
+    const m = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]{20,})/)
+    return m ? m[1] : null
+  }
+
+  const handleExport = async () => {
+    if (!lib || !lib.files.length) { showToast('库中没有文件', 'error'); return }
+    const spreadsheetId = extractSheetId(sheetUrl)
+    if (!spreadsheetId) { showToast('请输入有效的 Google Sheet 链接', 'error'); return }
+    if (!sheetName.trim()) { showToast('请输入分表名称', 'error'); return }
+
+    setExporting(true)
+    setProgress(null)
+
+    const unsubscribe = (api as unknown as {
+      sheets: { onExportProgress: (cb: (d: { current: number; total: number; name: string }) => void) => () => void }
+    }).sheets.onExportProgress((d) => setProgress(d))
+
+    try {
+      const result = await (api as unknown as {
+        sheets: { exportLibrary: (args: { files: { driveId: string; name: string; url: string }[]; spreadsheetId: string; sheetName: string; includeHeader: boolean }) => Promise<{ rowsWritten: number }> }
+      }).sheets.exportLibrary({
+        files: lib.files.map(f => ({ driveId: f.driveId, name: f.name, url: f.url })),
+        spreadsheetId,
+        sheetName: sheetName.trim(),
+        includeHeader
+      })
+      showToast(`✅ 导出成功！共写入 ${result.rowsWritten} 行`, 'success')
+      onClose()
+    } catch (e: unknown) {
+      showToast(`导出失败: ${(e as Error).message}`, 'error')
+    } finally {
+      unsubscribe()
+      setExporting(false)
+      setProgress(null)
+    }
+  }
+
+  if (!lib) return null
+
+  return (
+    <Modal open={open} onClose={onClose} title={`📤 导出「${lib.name}」到表格`}
+      footer={<>
+        <button className="btn btn--secondary" onClick={onClose} disabled={exporting}>取消</button>
+        <button className="btn btn--primary" onClick={handleExport}
+          disabled={exporting || !sheetUrl.trim() || !sheetName.trim()}>
+          {exporting ? <><Spinner size={14} /> 导出中...</> : '📤 开始导出'}
+        </button>
+      </>}>
+
+      {/* Target sheet URL */}
+      <div className="form-group">
+        <label className="form-label">目标 Google Sheet 链接 *</label>
+        <input className="input" placeholder="https://docs.google.com/spreadsheets/d/..."
+          value={sheetUrl} onChange={e => setSheetUrl(e.target.value)} disabled={exporting} />
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+          请确保该表格已向当前账号开放编辑权限
+        </div>
+      </div>
+
+      {/* Sheet name */}
+      <div className="form-group">
+        <label className="form-label">分表名称（Tab 名称）</label>
+        <input className="input" placeholder="Sheet1"
+          value={sheetName} onChange={e => setSheetName(e.target.value)} disabled={exporting} />
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+          分表必须已存在。数据将追加到该分表已有内容下方，不覆盖原有数据。
+        </div>
+      </div>
+
+      {/* Header option */}
+      <div style={{ marginBottom: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+          <input type="checkbox" checked={includeHeader} onChange={e => setIncludeHeader(e.target.checked)}
+            style={{ width: 15, height: 15 }} />
+          <span>包含标题行（文件名称 / 文件链接 / 所有者 / 常规访问权限）</span>
+        </label>
+      </div>
+
+      {/* Export info */}
+      <div style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--r-md)', padding: '10px 14px', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--text-primary)' }}>
+          将导出 {lib.files.length} 个文件，包含以下字段：
+        </div>
+        <div>📋 <strong>文件名称</strong> — 文件在 Drive 中的名称</div>
+        <div>🔗 <strong>文件链接</strong> — 可直接点击打开的 URL</div>
+        <div>👤 <strong>所有者</strong> — 文件创建者/所有者的邮箱</div>
+        <div>🌐 <strong>常规访问权限</strong> — 受限 / 任何知道链接的人（查看/评论/编辑）</div>
+      </div>
+
+      {/* Progress */}
+      {exporting && (
+        <div style={{ marginTop: 12 }}>
+          {progress ? (
+            <>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
+                正在读取权限 {progress.current}/{progress.total}：{progress.name}
+              </div>
+              <div className="progress-bar">
+                <div className="progress-bar__fill" style={{ width: `${(progress.current / progress.total) * 100}%`, transition: 'width 0.3s' }} />
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}><Spinner size={12} /> 正在写入表格...</div>
+          )}
+        </div>
+      )}
+    </Modal>
   )
 }
 
@@ -687,6 +818,7 @@ export default function Libraries() {
   const [createOpen, setCreateOpen] = useState(false)
   const [selectedLib, setSelectedLib] = useState<FileLibrary | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<FileLibrary | null>(null)
+  const [exportTarget, setExportTarget] = useState<FileLibrary | null>(null)
 
   const handleCreate = async (lib: FileLibrary) => {
     await saveLibraries([...libraries, lib])
@@ -725,7 +857,8 @@ export default function Libraries() {
           {libraries.map(lib => (
             <LibraryCard key={lib.id} lib={lib}
               onOpen={() => setSelectedLib(lib)}
-              onDelete={() => setDeleteTarget(lib)} />
+              onDelete={() => setDeleteTarget(lib)}
+              onExport={() => setExportTarget(lib)} />
           ))}
         </div>
       )}
@@ -741,6 +874,8 @@ export default function Libraries() {
         onConfirm={() => deleteTarget && handleDelete(deleteTarget)}
         title="删除表格库" danger
         message={`确定要删除「${deleteTarget?.name}」吗？该操作不可恢复，库中的文件引用将一并删除（不影响 Google 云端实际文件）。`} />
+
+      <ExportLibraryModal lib={exportTarget} open={!!exportTarget} onClose={() => setExportTarget(null)} />
     </div>
   )
 }

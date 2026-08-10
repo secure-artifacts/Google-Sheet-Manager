@@ -57,6 +57,16 @@ const api = {
     }
   },
 
+  // Sheets export
+  sheets: {
+    exportLibrary: (args: { files: { driveId: string; name: string; url: string }[]; spreadsheetId: string; sheetName: string; includeHeader: boolean }) =>
+      ipcRenderer.invoke('sheets:export-library', args),
+    onExportProgress: (cb: (data: { current: number; total: number; name: string }) => void) => {
+      ipcRenderer.on('sheets:export-progress', (_e, data) => cb(data))
+      return () => ipcRenderer.removeAllListeners('sheets:export-progress')
+    }
+  },
+
   // Shell
   shell: {
     openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url)
