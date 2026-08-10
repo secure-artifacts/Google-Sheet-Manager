@@ -58,7 +58,7 @@ export interface FilePermission {
 }
 
 // ─── Log Entry ────────────────────────────────────────────────────────────────
-export type OperationMode = 'sync' | 'grant' | 'add' | 'remove' | 'modify' | 'lock' | 'unlock'
+export type OperationMode = 'sync' | 'grant' | 'add' | 'remove' | 'modify' | 'lock' | 'unlock' | 'transfer' | 'accept'
 
 export interface LogEntry {
   id: string

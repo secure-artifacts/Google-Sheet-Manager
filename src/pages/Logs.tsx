@@ -5,7 +5,8 @@ import { EmptyState, RoleBadge } from '../components/ui'
 import { eAPI } from '../lib/api'
 
 const MODE_LABELS: Record<OperationMode, string> = {
-  sync: '一键同步', grant: '批量授权', add: '添加邮箱', remove: '移除邮箱', modify: '修改角色'
+  sync: '一键同步', grant: '批量授权', add: '添加邮箱', remove: '移除邮箱', modify: '修改角色',
+  lock: '高级锁表', unlock: '解除锁表', transfer: '转让所有权', accept: '接收所有权'
 }
 const ACTION_COLORS: Record<string, string> = {
   added: 'green', removed: 'red', modified: 'blue', skipped: 'gray', failed: 'red'

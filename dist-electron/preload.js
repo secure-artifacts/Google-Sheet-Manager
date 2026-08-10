@@ -33,6 +33,8 @@ const api = {
     drive: {
         scan: (query) => electron_1.ipcRenderer.invoke('drive:scan', query),
         scanFolderRecursive: (args) => electron_1.ipcRenderer.invoke('drive:scan-folder-recursive', args),
+        transferOwnership: (args) => electron_1.ipcRenderer.invoke('drive:transfer-ownership', args),
+        acceptOwnership: (args) => electron_1.ipcRenderer.invoke('drive:accept-ownership', args),
         getPermissions: (fileId) => electron_1.ipcRenderer.invoke('drive:get-permissions', fileId),
         getFileInfo: (fileId) => electron_1.ipcRenderer.invoke('drive:get-file-info', fileId),
         setWritersCanShare: (args) => electron_1.ipcRenderer.invoke('drive:set-writers-can-share', args),

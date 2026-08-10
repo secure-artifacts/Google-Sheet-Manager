@@ -20,13 +20,15 @@ type ProgressItem = {
 
 // ─── Operation Modes ──────────────────────────────────────────────────────────
 const OP_MODES = [
-  { key: 'sync'   as OperationMode, icon: '⚡', title: '一键同步',   desc: '授权权限库成员，自动移除其他人（owner除外）', color: '#7b6fff' },
-  { key: 'grant'  as OperationMode, icon: '✅', title: '批量授权',   desc: '仅将权限库邮箱授权，不移除已有成员',          color: '#22d3a0' },
-  { key: 'add'    as OperationMode, icon: '➕', title: '添加指定邮箱', desc: '为选定文件添加单个或多个邮箱权限',            color: '#60a5fa' },
-  { key: 'remove' as OperationMode, icon: '🗑', title: '移除指定邮箱', desc: '从选定文件中移除指定邮箱的权限',              color: '#f87171' },
-  { key: 'modify' as OperationMode, icon: '✏️', title: '修改权限角色', desc: '修改指定邮箱在选定文件上的权限角色',          color: '#fbbf24' },
-  { key: 'lock'   as OperationMode, icon: '🔒', title: '高级锁表',   desc: '仅表格所有者可添加/移除成员，编辑者无法分享', color: '#f472b6' },
-  { key: 'unlock' as OperationMode, icon: '🔓', title: '解除锁表',   desc: '恢复默认状态，编辑者也可以分享文件',          color: '#a78bfa' },
+  { key: 'sync'     as OperationMode, icon: '⚡', title: '一键同步',   desc: '授权权限库成员，自动移除其他人（owner除外）',              color: '#7b6fff' },
+  { key: 'grant'    as OperationMode, icon: '✅', title: '批量授权',   desc: '仅将权限库邮箱授权，不移除已有成员',                      color: '#22d3a0' },
+  { key: 'add'      as OperationMode, icon: '➕', title: '添加指定邮箱', desc: '为选定文件添加单个或多个邮箱权限',                        color: '#60a5fa' },
+  { key: 'remove'   as OperationMode, icon: '🗑', title: '移除指定邮箱', desc: '从选定文件中移除指定邮箱的权限',                          color: '#f87171' },
+  { key: 'modify'   as OperationMode, icon: '✏️', title: '修改权限角色', desc: '修改指定邮箱在选定文件上的权限角色',                      color: '#fbbf24' },
+  { key: 'transfer' as OperationMode, icon: '👑', title: '转让所有权',  desc: '将文件所有权转让给指定邮箱（先添加编辑者，再转让所有权）', color: '#f97316' },
+  { key: 'accept'   as OperationMode, icon: '🤝', title: '接收所有权',  desc: '当前账号接收他人发起的所有权转让邀请（批量）',             color: '#14b8a6' },
+  { key: 'lock'     as OperationMode, icon: '🔒', title: '高级锁表',   desc: '仅表格所有者可添加/移除成员，编辑者无法分享',             color: '#f472b6' },
+  { key: 'unlock'   as OperationMode, icon: '🔓', title: '解除锁表',   desc: '恢复默认状态，编辑者也可以分享文件',                      color: '#a78bfa' },
 ]
 
 // ─── Library Selector (multi-select at library level) ────────────────────────
@@ -265,6 +267,8 @@ export default function Sync() {
     if (mode === 'sync' || mode === 'grant') return mergedEmails.length > 0 || generalAccess !== 'restricted'
     if (mode === 'add' || mode === 'remove' || mode === 'modify') return parseCustomEmails().length > 0
     if (mode === 'lock' || mode === 'unlock') return true
+    if (mode === 'transfer') return parseCustomEmails().length === 1  // exactly 1 target email
+    if (mode === 'accept') return true  // uses current user email
     return false
   }
 
@@ -460,6 +464,53 @@ export default function Sync() {
             await addLogEntry(file.driveId, file.name, file.url, '(文件设置)', 'failed', undefined, (e as Error).message)
           }
         }
+
+      } else if (mode === 'transfer') {
+        // Transfer ownership: ensure editor first, then set owner
+        const targetEmail = parseCustomEmails()[0]
+        setTotalOps(targetFiles.length)
+        for (const file of targetFiles) {
+          if (abortRef.current) break
+          try {
+            const res = await (api.drive as unknown as {
+              transferOwnership: (a: { fileId: string; targetEmail: string }) => Promise<{ status: string }>
+            }).transferOwnership({ fileId: file.driveId, targetEmail })
+            if (res.status === 'already_owner') {
+              pushProgress({ email: targetEmail, fileName: file.name, action: 'skipped' })
+              await addLogEntry(file.driveId, file.name, file.url, targetEmail, 'skipped', 'owner')
+            } else {
+              pushProgress({ email: targetEmail, fileName: file.name, action: 'modified' })
+              await addLogEntry(file.driveId, file.name, file.url, targetEmail, 'modified', 'owner')
+            }
+          } catch (e: unknown) {
+            pushProgress({ email: targetEmail, fileName: file.name, action: 'failed', error: (e as Error).message })
+            await addLogEntry(file.driveId, file.name, file.url, targetEmail, 'failed', undefined, (e as Error).message)
+          }
+        }
+
+      } else if (mode === 'accept') {
+        // Accept ownership: current user accepts pending ownership transfer
+        const authStatus = await api.auth.getStatus() as { email: string }
+        const userEmail = authStatus.email
+        setTotalOps(targetFiles.length)
+        for (const file of targetFiles) {
+          if (abortRef.current) break
+          try {
+            const res = await (api.drive as unknown as {
+              acceptOwnership: (a: { fileId: string; userEmail: string }) => Promise<{ status: string }>
+            }).acceptOwnership({ fileId: file.driveId, userEmail })
+            if (res.status === 'already_owner') {
+              pushProgress({ email: userEmail, fileName: file.name, action: 'skipped' })
+              await addLogEntry(file.driveId, file.name, file.url, userEmail, 'skipped', 'owner')
+            } else {
+              pushProgress({ email: userEmail, fileName: file.name, action: 'added' })
+              await addLogEntry(file.driveId, file.name, file.url, userEmail, 'added', 'owner')
+            }
+          } catch (e: unknown) {
+            pushProgress({ email: userEmail, fileName: file.name, action: 'failed', error: (e as Error).message })
+            await addLogEntry(file.driveId, file.name, file.url, userEmail, 'failed', undefined, (e as Error).message)
+          }
+        }
       }
 
       setDone(true)
@@ -471,11 +522,13 @@ export default function Sync() {
     }
   }
 
-  const needsGroup   = mode === 'sync' || mode === 'grant'
-  const needsEmails  = mode === 'add' || mode === 'remove' || mode === 'modify'
-  const needsRole    = mode === 'add' || mode === 'modify'
-  const isLockMode   = mode === 'lock' || mode === 'unlock'
-  const currentMode  = OP_MODES.find(m => m.key === mode)!
+  const needsGroup      = mode === 'sync' || mode === 'grant'
+  const needsEmails     = mode === 'add' || mode === 'remove' || mode === 'modify'
+  const needsRole       = mode === 'add' || mode === 'modify'
+  const isLockMode      = mode === 'lock' || mode === 'unlock'
+  const isTransferMode  = mode === 'transfer'
+  const isAcceptMode    = mode === 'accept'
+  const currentMode     = OP_MODES.find(m => m.key === mode)!
 
   return (
     <div className="page">
@@ -606,6 +659,51 @@ export default function Sync() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Transfer Ownership */}
+          {isTransferMode && (
+            <div className="card card-body" style={{ borderColor: 'rgba(249,115,22,0.35)' }}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <div style={{ fontSize: 28 }}>👑</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, marginBottom: 8 }}>转让所有权 — 输入接收方邮箱（只能填写 1 个）</div>
+                  <div className="form-group" style={{ marginBottom: 6 }}>
+                    <textarea className="textarea" style={{ minHeight: 60 }}
+                      placeholder="new-owner@example.com（只填一个邮箱）"
+                      value={customEmails} onChange={e => setCustomEmails(e.target.value)} />
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                      {parseCustomEmails().length === 0 && '请输入接收方邮箱'}
+                      {parseCustomEmails().length === 1 && <span style={{ color: 'var(--accent-2)' }}>✓ 目标邮箱：{parseCustomEmails()[0]}</span>}
+                      {parseCustomEmails().length > 1 && <span style={{ color: 'var(--red)' }}>⚠ 只能填写 1 个邮箱（当前 {parseCustomEmails().length} 个）</span>}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.8, background: 'var(--bg-base)', borderRadius: 'var(--r-md)', padding: '8px 12px' }}>
+                    <strong>执行步骤：</strong><br />
+                    ① 检查接收方是否已是编辑者，若不是则先添加为编辑者<br />
+                    ② 将文件所有权转让给该邮箱<br />
+                    <span style={{ color: 'var(--accent-1)' }}>⚠ 如果接收方是个人 Gmail，对方需要在邮件中点击「接受」后才正式成为所有者</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Accept Ownership */}
+          {isAcceptMode && (
+            <div className="card card-body" style={{ borderColor: 'rgba(20,184,166,0.35)' }}>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <div style={{ fontSize: 28 }}>🤝</div>
+                <div>
+                  <div style={{ fontWeight: 700, marginBottom: 6 }}>接收所有权 — 使用当前登录账号</div>
+                  <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.8 }}>
+                    系统将用当前账号尝试接受文件的所有权转让邀请。<br />
+                    适用场景：他人已将文件所有权转让给你，你需要通过此功能批量接受。<br />
+                    <span style={{ color: 'var(--accent-1)' }}>⚠ 若文件的所有权还未被转让，接收操作会报错，不会影响其他文件。</span>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 

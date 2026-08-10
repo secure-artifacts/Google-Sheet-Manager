@@ -515,6 +515,51 @@ electron_1.ipcMain.handle('drive:set-general-access', async (_e, { fileId, acces
 });
 // ── Open external link
 electron_1.ipcMain.handle('shell:open-external', (_e, url) => electron_1.shell.openExternal(url));
+// ── Drive: Transfer Ownership (2-step: ensure editor → set owner) ─────────────
+electron_1.ipcMain.handle('drive:transfer-ownership', async (_e, { fileId, targetEmail }) => {
+    const token = await getValidToken();
+    // Fetch current permissions
+    const permsResult = await apiGet(`/drive/v3/files/${fileId}/permissions?fields=permissions(id,emailAddress,role,type)&supportsAllDrives=true`, token);
+    const perms = permsResult.permissions || [];
+    const existing = perms.find(p => p.emailAddress?.toLowerCase() === targetEmail.toLowerCase());
+    // If already owner → skip everything
+    if (existing?.role === 'owner')
+        return { status: 'already_owner' };
+    let permId;
+    // Step 1: ensure target has editor (writer) role
+    if (!existing) {
+        // Add new editor permission
+        const created = await apiRequest('POST', `/drive/v3/files/${fileId}/permissions?sendNotificationEmail=true&supportsAllDrives=true`, token, { role: 'writer', type: 'user', emailAddress: targetEmail });
+        permId = created.id;
+    }
+    else if (existing.role !== 'writer') {
+        // Upgrade existing permission to editor
+        await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${existing.id}?supportsAllDrives=true`, token, { role: 'writer' });
+        permId = existing.id;
+    }
+    else {
+        // Already editor
+        permId = existing.id;
+    }
+    // Step 2: Transfer ownership (role='owner' + transferOwnership=true)
+    await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${permId}?transferOwnership=true&supportsAllDrives=true`, token, { role: 'owner' });
+    return { status: 'transferred', permId };
+});
+// ── Drive: Accept Ownership (current user accepts a pending ownership transfer) ─
+electron_1.ipcMain.handle('drive:accept-ownership', async (_e, { fileId, userEmail }) => {
+    const token = await getValidToken();
+    // Find current user's permission on this file
+    const permsResult = await apiGet(`/drive/v3/files/${fileId}/permissions?fields=permissions(id,emailAddress,role,type)&supportsAllDrives=true`, token);
+    const perms = permsResult.permissions || [];
+    const myPerm = perms.find(p => p.emailAddress?.toLowerCase() === userEmail.toLowerCase());
+    if (!myPerm)
+        throw new Error('当前账号在该文件上没有权限记录，无法接收所有权');
+    if (myPerm.role === 'owner')
+        return { status: 'already_owner' };
+    // Accept the pending ownership transfer
+    await apiRequest('PATCH', `/drive/v3/files/${fileId}/permissions/${myPerm.id}?transferOwnership=true&supportsAllDrives=true`, token, { role: 'owner' });
+    return { status: 'accepted' };
+});
 // ── Sheets: export library files to a Google Sheet ───────────────────────────
 electron_1.ipcMain.handle('sheets:export-library', async (event, { files, spreadsheetId, sheetName, includeHeader }) => {
     const token = await getValidToken();

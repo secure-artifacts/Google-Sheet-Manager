@@ -39,6 +39,10 @@ const api = {
     scan: (query?: string) => ipcRenderer.invoke('drive:scan', query),
     scanFolderRecursive: (args: { folderIds: string[]; mimeTypes: string[]; ownerOnly: boolean }) =>
       ipcRenderer.invoke('drive:scan-folder-recursive', args),
+    transferOwnership: (args: { fileId: string; targetEmail: string }) =>
+      ipcRenderer.invoke('drive:transfer-ownership', args),
+    acceptOwnership: (args: { fileId: string; userEmail: string }) =>
+      ipcRenderer.invoke('drive:accept-ownership', args),
     getPermissions: (fileId: string) => ipcRenderer.invoke('drive:get-permissions', fileId),
     getFileInfo: (fileId: string) => ipcRenderer.invoke('drive:get-file-info', fileId),
     setWritersCanShare: (args: { fileId: string; writersCanShare: boolean }) =>
